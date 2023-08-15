@@ -1,0 +1,18 @@
+name: Delete Preview environment
+
+on:
+  pull_request_target:
+    types: [ closed ]
+
+jobs:
+  delete-preview-env:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: humanitec/preview-envs-action@v1
+        with:
+          humanitec-token: 
+          humanitec-org: 
+          humanitec-app: my-app
+          action: delete
+          github-token: 

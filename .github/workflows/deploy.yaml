@@ -1,0 +1,98 @@
+name: Deploy Oliver-test-2
+
+on:
+  push:
+    branches: main
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+env:
+  AWS_ECR: ${{ secrets.AWS_ECR }}
+
+  IMAGE: oliver-test-2
+
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+
+jobs:
+  deploy:
+    name: Build & Notify Humanitec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set Tag with SHA
+        run: echo "TAG=`echo $GITHUB_SHA | cut -c 1-7`" >> $GITHUB_ENV
+
+      - run: |
+          aws ecr get-login-password --region $AWS_REGION \
+            | docker login \
+                --username AWS \
+                --password-stdin \
+                $AWS_ECR
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'          
+      - run: mvn package
+      - run: docker build --platform linux/amd64 . -t $AWS_ECR/$IMAGE:$TAG
+      - run: docker push $AWS_ECR/$IMAGE:$TAG
+
+      - name: Inform Humanitec
+        run: |-
+          curl \
+            --request POST 'https://api.humanitec.io/orgs/${{ secrets.HUMANITEC_ORG_ID }}/images/myapp/builds' \
+            --header 'Authorization: Bearer ${{ secrets.HUMANITEC_TOKEN }}' \
+            --header 'Content-Type: application/json' \
+            --data-raw '{
+                "branch": "'$GITHUB_REF_NAME'",
+                "commit": "'$GITHUB_SHA'",
+                "image": "'$AWS_ECR/$IMAGE:$TAG'",
+                "tags": ["'$TAG'"]
+            }'
+      - uses: humanitec/preview-envs-action@v1
+        with:
+          humanitec-org: ${{ secrets.HUMANITEC_ORG_ID }}
+          humanitec-app: my-app
+          action: notify
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          environment-url-template: https://dev-{{envId}}.my-domain.app
+      - name: Get Preview Environment
+        id: preview-env
+        uses: humanitec/preview-envs-action@mst-wal-7302-test-on-pr
+        with:
+          humanitec-org: ${{ secrets.HUMANITEC_ORG_ID }}
+          humanitec-app: humanitec-frontend
+          action: get-environment-url
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          environment-url-template: "https://{{envId}}-app.humanitec.io"
+      - name: Print preview environment url
+        run: |
+        echo "This is the preview environment url: ${{ steps.preview-env.outputs.environment-url }}"          
+      - name: Deploy using Score
+        run: |
+          wget https://github.com/score-spec/score-humanitec/releases/download/0.4.0/score-humanitec_0.4.0_linux_amd64.tar.gz
+          tar -xvzf ./score-humanitec_0.4.0_linux_amd64.tar.gz
+
+          cat <<EOF > humanitec.score.yaml
+          apiVersion: humanitec.org/v1b1
+          spec:
+            ingress:
+              rules:
+                "\${resources.dns}": # This is the DNS record that we defined in the resources section
+                  http:
+                    "/":
+                      type: prefix
+                      port: 80
+          containers:
+            frontend:
+              image: $AWS_ECR/$IMAGE:$TAG
+          EOF
+
+          ./score-humanitec delta --env development --overrides ./humanitec.score.yaml --app oliver-test-2 --org="${{ secrets.HUMANITEC_ORG_ID }}" --token "${{ secrets.HUMANITEC_TOKEN }}" --deploy
+
